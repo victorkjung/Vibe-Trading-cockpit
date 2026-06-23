@@ -275,6 +275,34 @@ def _num(m: dict[str, Any], *keys: str) -> Optional[float]:
     return None
 
 
+def _edge_reliability(
+    model: Optional[float], implied: Optional[float],
+    mins: Optional[float], open_interest: Optional[float],
+) -> tuple[str, Optional[str]]:
+    """Judge whether an edge is trustworthy or a model artifact.
+
+    The driftless log-normal model is unreliable for short-horizon directional
+    markets: near at-the-money it collapses to ~50% and ignores momentum, so it
+    routinely disagrees with a deep, liquid book that is the better estimate.
+    This gate downgrades those cases instead of advertising phantom edges.
+
+    Returns:
+        (reliability, warning) where reliability is "ok" | "low" | "suspect".
+    """
+    if model is None or implied is None:
+        return "low", "no model (expired or zero time/vol)"
+    edge = abs(model - implied)
+    if mins is not None and mins < 2:
+        return "low", "under 2 min to close — settlement-average noise dominates"
+    # Big disagreement with a deep book: trust the book, not the model.
+    if edge > 0.15 and (open_interest or 0) > 50000:
+        return "suspect", "deep liquid book disagrees by >15pts — likely model error, not edge"
+    # Near-ATM coin flip: model number is mostly an artifact of the vol input.
+    if 0.4 <= model <= 0.6:
+        return "low", "model near 50% (at-the-money) — driftless model unreliable here"
+    return "ok", None
+
+
 def build_snapshot(
     series_ticker: str, *, include_expired: bool = False, with_trades: bool = False,
 ) -> dict[str, Any]:
@@ -314,6 +342,9 @@ def build_snapshot(
         if expired and not include_expired:
             continue  # Kalshi keeps just-closed windows "active" during settlement
 
+        oi = _num(m, "open_interest_fp", "open_interest")
+        reliability, warning = _edge_reliability(model, implied, mins, oi)
+
         row = {
             "ticker": m.get("ticker"),
             "subtitle": m.get("yes_sub_title") or m.get("subtitle"),
@@ -326,8 +357,10 @@ def build_snapshot(
             "implied_prob": round(implied, 4) if implied is not None else None,
             "model_prob": round(model, 4) if model is not None else None,
             "edge": round(edge, 4) if edge is not None else None,
+            "edge_reliability": reliability,
+            "warning": warning,
             "volume": _num(m, "volume_fp", "volume"),
-            "open_interest": _num(m, "open_interest_fp", "open_interest"),
+            "open_interest": oi,
         }
         if with_trades and m.get("ticker"):
             row["recent_trades"] = fetch_recent_trades(m["ticker"])
@@ -353,7 +386,7 @@ def _print_table(snap: dict[str, Any], top: int, min_edge: float) -> None:
     if not rows:
         print("(no markets meet the edge threshold)")
         return
-    hdr = f"{'ticker':<22}{'bracket':<22}{'min':>5}{'impl':>7}{'model':>7}{'edge':>7}{'OI':>8}"
+    hdr = f"{'ticker':<22}{'bracket':<22}{'min':>5}{'impl':>7}{'model':>7}{'edge':>7}  {'edge?':<8}"
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
@@ -362,7 +395,10 @@ def _print_table(snap: dict[str, Any], top: int, min_edge: float) -> None:
         model = f"{r['model_prob'] * 100:.0f}%" if r["model_prob"] is not None else "-"
         edge = f"{r['edge'] * 100:+.0f}%" if r["edge"] is not None else "-"
         mins = f"{r['minutes_to_close']:.0f}" if r["minutes_to_close"] is not None else "-"
-        print(f"{(r['ticker'] or '')[:21]:<22}{bracket[:21]:<22}{mins:>5}{impl:>7}{model:>7}{edge:>7}{str(r['open_interest'] or '-'):>8}")
+        rel = r.get("edge_reliability", "")
+        print(f"{(r['ticker'] or '')[:21]:<22}{bracket[:21]:<22}{mins:>5}{impl:>7}{model:>7}{edge:>7}  {rel:<8}")
+        if r.get("warning"):
+            print(f"    ⚠ {r['warning']}")
 
 
 def main() -> int:

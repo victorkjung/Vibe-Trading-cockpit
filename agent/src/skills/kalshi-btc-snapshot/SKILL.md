@@ -101,6 +101,12 @@ of scope for this read-only skill.
 3. **σ (annualized)** — realized vol from recent OKX 1m candles, annualized by
    `√(525,600)`. Replace with Kalshi/Deribit IV later for a sharper estimate.
 4. **Edge** — `model_prob − implied_prob`. Positive ⇒ market underpricing YES.
+   Each row carries `edge_reliability` (`ok` / `low` / `suspect`) + a `warning`.
+   The driftless model is unreliable for short directional windows: near ATM it
+   collapses to ~50% and ignores momentum, so a large disagreement with a deep,
+   liquid book is flagged `suspect` — **trust the book, not the model**. Treat
+   `ok` edges in thin/OTM markets as the only candidates, and even then as a
+   screen, not a trigger.
 
 ## Output Format
 
