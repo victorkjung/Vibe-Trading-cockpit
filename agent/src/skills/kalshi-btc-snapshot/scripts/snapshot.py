@@ -170,6 +170,44 @@ def _kalshi_auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+def fetch_recent_trades(ticker: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Recent executed trades for a market (public /markets/trades endpoint).
+
+    This is the actual trade *flow* (prints), distinct from the current quote.
+    For continuous real-time flow use the Kalshi WebSocket `trade` channel; this
+    REST call is a point-in-time pull of the most recent fills.
+
+    Args:
+        ticker: Full market ticker, e.g. "KXBTC15M-26JUN231530-30".
+        limit: Max trades to return (most recent first).
+
+    Returns:
+        List of {price, count, taker_side, ts} dicts (newest first).
+    """
+    try:
+        resp = requests.get(
+            f"{KALSHI_BASE}/markets/trades",
+            params={"ticker": ticker, "limit": str(limit)},
+            headers=_kalshi_auth_headers(), timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        out: list[dict[str, Any]] = []
+        for t in resp.json().get("trades", []):
+            price = t.get("yes_price_dollars")
+            price = float(price) if price is not None else (
+                t.get("yes_price") / 100.0 if t.get("yes_price") is not None else None
+            )
+            out.append({
+                "price": price,
+                "count": _num(t, "count_fp", "count"),
+                "taker_side": t.get("taker_side"),
+                "ts": t.get("created_time"),
+            })
+        return out
+    except Exception:
+        return []
+
+
 # --------------------------------------------------------------------------- #
 # Snapshot assembly
 # --------------------------------------------------------------------------- #
@@ -237,8 +275,18 @@ def _num(m: dict[str, Any], *keys: str) -> Optional[float]:
     return None
 
 
-def build_snapshot(series_ticker: str) -> dict[str, Any]:
-    """Assemble the full snapshot payload for a series."""
+def build_snapshot(
+    series_ticker: str, *, include_expired: bool = False, with_trades: bool = False,
+) -> dict[str, Any]:
+    """Assemble the full snapshot payload for a series.
+
+    Args:
+        series_ticker: Kalshi series (e.g. KXBTC15M).
+        include_expired: Keep windows already past close_time. Kalshi leaves a
+            just-closed market `active` during settlement, so by default these
+            stale windows (minutes_to_close <= 0) are dropped.
+        with_trades: Attach recent executed trades (real trade flow) per market.
+    """
     spot = fetch_btc_spot()
     sigma = fetch_realized_vol()
     markets = fetch_kalshi_markets(series_ticker)
@@ -262,12 +310,17 @@ def build_snapshot(series_ticker: str) -> dict[str, Any]:
         )
         edge = (model - implied) if (model is not None and implied is not None) else None
 
-        rows.append({
+        expired = mins is not None and mins <= 0
+        if expired and not include_expired:
+            continue  # Kalshi keeps just-closed windows "active" during settlement
+
+        row = {
             "ticker": m.get("ticker"),
             "subtitle": m.get("yes_sub_title") or m.get("subtitle"),
             "floor_strike": floor,
             "cap_strike": cap,
             "minutes_to_close": round(mins, 1) if mins is not None else None,
+            "expired": expired,
             "yes_bid": yes_bid,
             "yes_ask": yes_ask,
             "implied_prob": round(implied, 4) if implied is not None else None,
@@ -275,7 +328,10 @@ def build_snapshot(series_ticker: str) -> dict[str, Any]:
             "edge": round(edge, 4) if edge is not None else None,
             "volume": _num(m, "volume_fp", "volume"),
             "open_interest": _num(m, "open_interest_fp", "open_interest"),
-        })
+        }
+        if with_trades and m.get("ticker"):
+            row["recent_trades"] = fetch_recent_trades(m["ticker"])
+        rows.append(row)
 
     rows.sort(key=lambda r: (abs(r["edge"]) if r["edge"] is not None else -1), reverse=True)
     return {
@@ -284,6 +340,7 @@ def build_snapshot(series_ticker: str) -> dict[str, Any]:
         "btc_spot": spot,
         "realized_vol_annual": round(sigma, 4),
         "market_count": len(rows),
+        "live_market_count": sum(1 for r in rows if not r["expired"]),
         "markets": rows,
     }
 
@@ -316,10 +373,13 @@ def main() -> int:
     parser.add_argument("--top", type=int, default=10, help="Max rows to print in table mode")
     parser.add_argument("--min-edge", type=float, default=0.0, help="Only show |edge| >= this (0-1)")
     parser.add_argument("--json", action="store_true", help="Emit JSON only (machine-readable)")
+    parser.add_argument("--trades", action="store_true", help="Attach recent executed trades per market")
+    parser.add_argument("--include-expired", action="store_true",
+                        help="Keep windows already past close (default: drop stale settling windows)")
     args = parser.parse_args()
 
     try:
-        snap = build_snapshot(args.series)
+        snap = build_snapshot(args.series, include_expired=args.include_expired, with_trades=args.trades)
     except requests.HTTPError as exc:
         print(f"[snapshot] HTTP error: {exc}", file=sys.stderr)
         return 2
