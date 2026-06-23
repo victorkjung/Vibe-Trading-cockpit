@@ -18,7 +18,7 @@ place orders) by joining three feeds:
 
 | Feed | Source | Purpose |
 |------|--------|---------|
-| BTC spot | OKX public ticker | Current underlying price |
+| BTC spot | Coinbase/Kraken/Bitstamp USD median (OKX fallback) | Tracks Kalshi's CF Benchmarks BRTI settlement index |
 | Realized vol | OKX 1m candles | Short-horizon sigma for the model |
 | Kalshi quotes | Kalshi public `/markets` | Implied probability per bracket |
 
@@ -73,8 +73,10 @@ Notes that affect the model:
 - `KXBTC15M` strike sits near the prevailing BTC price at open, banded to a round
   number — so the model collapses to `P(S_T > strike)`, which the script computes
   via the "greater" branch (`cap_strike = None`).
-- The 15-min reference (RTI) differs slightly from OKX spot used here; treat the
-  model as an approximation, sharpest when there's no scheduled catalyst.
+- Spot now approximates Kalshi's BRTI (USD median of Coinbase/Kraken/Bitstamp)
+  instead of OKX BTC-USDT, removing the USDT basis and matching Kalshi's "NOW"
+  closely. It's still an approximation of the exact RTI/BRRNY print; treat the
+  model as a screen, sharpest when there's no scheduled catalyst.
 
 ## Configuration
 

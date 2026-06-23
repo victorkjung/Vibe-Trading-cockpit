@@ -93,8 +93,44 @@ def lognormal_prob_between(
 # --------------------------------------------------------------------------- #
 # Data fetchers
 # --------------------------------------------------------------------------- #
+def _median(xs: list[float]) -> Optional[float]:
+    s = sorted(xs)
+    n = len(s)
+    if not n:
+        return None
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
 def fetch_btc_spot() -> float:
-    """Live BTC-USDT spot price from the OKX public ticker."""
+    """Live BTC spot, approximating Kalshi's CF Benchmarks BRTI settlement index.
+
+    Kalshi BTC markets settle on the USD BRTI/BRRNY index (multi-exchange), not a
+    single venue. To track the "NOW" Kalshi shows — and to compare against the
+    USD strike on the same scale — take the median of USD spot from BRTI
+    constituents (Coinbase / Kraken / Bitstamp). Falls back to OKX BTC-USDT only
+    if all USD sources are unreachable (note: USDT carries a small basis vs USD).
+    """
+    t = min(HTTP_TIMEOUT, 4.0)
+    prices: list[float] = []
+    sources = [
+        ("https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+         lambda j: float(j["price"])),
+        ("https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
+         lambda j: float(next(iter(j["result"].values()))["c"][0])),
+        ("https://www.bitstamp.net/api/v2/ticker/btcusd/",
+         lambda j: float(j["last"])),
+    ]
+    for url, parse in sources:
+        try:
+            r = requests.get(url, timeout=t, headers={"User-Agent": "kalshi-snapshot"})
+            r.raise_for_status()
+            prices.append(parse(r.json()))
+        except Exception:
+            continue
+    med = _median(prices)
+    if med is not None:
+        return med
+    # Fallback: OKX USDT (single venue, small USD basis).
     resp = requests.get(
         f"{OKX_BASE}/market/ticker", params={"instId": "BTC-USDT"}, timeout=HTTP_TIMEOUT
     )
