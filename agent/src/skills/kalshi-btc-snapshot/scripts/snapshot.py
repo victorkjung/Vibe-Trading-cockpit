@@ -300,6 +300,9 @@ def _edge_reliability(
     # Near-ATM coin flip: model number is mostly an artifact of the vol input.
     if 0.4 <= model <= 0.6:
         return "low", "model near 50% (at-the-money) — driftless model unreliable here"
+    # Near the 0/100 boundary the model under-prices tail/jump risk vs the book.
+    if (implied >= 0.85 or implied <= 0.15) and edge >= 0.04:
+        return "low", "near-boundary — model under-prices tail/jump risk into close"
     return "ok", None
 
 

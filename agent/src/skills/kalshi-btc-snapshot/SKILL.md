@@ -140,6 +140,23 @@ panel. True tick-level streaming is the optional upgrade: Kalshi's WebSocket
 (`wss://.../trade-api/ws/v2`) requires a signed **read-only** API key (no trading
 scope), and the engine's event shape is designed to accept it as a drop-in.
 
+## Web Cockpit
+
+`scripts/serve.py` is a self-contained monitoring dashboard (no build step, no
+agent stack, no order path). It serves an embedded HTML page plus an SSE stream
+of the monitor — open it from any browser on your mesh.
+
+```bash
+pip install fastapi uvicorn requests
+python scripts/serve.py --series KXBTC15M --host 0.0.0.0 --port 8787
+# then browse to  http://<vps-tailscale-ip>:8787   e.g. http://100.87.250.108:8787
+```
+
+Endpoints: `/` (dashboard), `/api/snapshot` (one-shot JSON), `/api/stream` (SSE).
+The page shows live market tiles (implied vs model, edge + reliability badge,
+local expiry countdown, OI/volume) and a scrolling anomaly feed. Keep it bound to
+the Tailscale IP (not a public interface) so it stays private.
+
 ## Swarm
 
 For the multi-agent "Palantir desk" view, run the **`kalshi_btc_15m_desk`** swarm

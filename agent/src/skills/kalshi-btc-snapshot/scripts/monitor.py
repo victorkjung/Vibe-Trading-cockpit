@@ -35,8 +35,8 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import snapshot  # noqa: E402
 
-# Anomaly thresholds (tunable).
-LARGE_PRINT = 100.0      # contracts in a single trade
+# Anomaly thresholds (tunable; LARGE_PRINT overridable via --large-print).
+LARGE_PRINT = 500.0      # contracts in a single trade
 IMPLIED_MOVE = 0.05      # |Δ implied prob| between ticks
 IMBALANCE = 0.70         # |yes-no| / total taker volume
 EXPIRING_MIN = 2.0       # minutes-to-close warning
@@ -72,7 +72,8 @@ def _tape_flow(trades: list[dict[str, Any]], since_ts: Optional[str]) -> dict[st
     }
 
 
-def diff_tick(snap: dict[str, Any], state: dict[str, dict]) -> list[dict[str, Any]]:
+def diff_tick(snap: dict[str, Any], state: dict[str, dict],
+              large_print: float = LARGE_PRINT) -> list[dict[str, Any]]:
     """Compare this snapshot to prior state; return a list of events."""
     events: list[dict[str, Any]] = []
     for m in snap["markets"]:
@@ -96,7 +97,7 @@ def diff_tick(snap: dict[str, Any], state: dict[str, dict]) -> list[dict[str, An
                 events.append({"type": "IMPLIED_MOVE", "ticker": tkr,
                                "delta": round(d, 4), "implied": m["implied_prob"]})
 
-        if flow["largest"] >= LARGE_PRINT:
+        if flow["largest"] >= large_print:
             events.append({"type": "LARGE_PRINT", "ticker": tkr,
                            "size": flow["largest"], "imbalance": flow["imbalance"]})
         if (flow["yes_vol"] + flow["no_vol"]) > 0 and abs(flow["imbalance"]) >= IMBALANCE:
@@ -128,7 +129,8 @@ def _print_console(snap: dict[str, Any], events: list[dict[str, Any]]) -> None:
         print(f"    » {e['type']}: " + ", ".join(f"{k}={v}" for k, v in e.items() if k != "type"))
 
 
-def run(series: str, interval: float, duration: Optional[float], ndjson: bool) -> int:
+def run(series: str, interval: float, duration: Optional[float], ndjson: bool,
+        large_print: float = LARGE_PRINT) -> int:
     state: dict[str, dict] = {}
     start = time.monotonic()
     while True:
@@ -140,7 +142,7 @@ def run(series: str, interval: float, duration: Optional[float], ndjson: bool) -
             time.sleep(interval)
             continue
 
-        events = diff_tick(snap, state)
+        events = diff_tick(snap, state, large_print)
         if ndjson:
             print(json.dumps({"type": "TICK", "ts": snap["generated_at"],
                               "spot": snap["btc_spot"], "markets": snap["markets"],
@@ -159,9 +161,11 @@ def main() -> int:
     p.add_argument("--interval", type=float, default=2.0, help="Seconds between polls")
     p.add_argument("--duration", type=float, default=None, help="Stop after N seconds")
     p.add_argument("--ndjson", action="store_true", help="Emit one JSON event per line")
+    p.add_argument("--large-print", type=float, default=LARGE_PRINT,
+                   help=f"Single-trade size to flag as LARGE_PRINT (default {LARGE_PRINT:.0f})")
     args = p.parse_args()
     try:
-        return run(args.series, args.interval, args.duration, args.ndjson)
+        return run(args.series, args.interval, args.duration, args.ndjson, args.large_print)
     except KeyboardInterrupt:
         print("\n[monitor] stopped.", file=sys.stderr)
         return 0
