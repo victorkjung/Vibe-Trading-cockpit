@@ -123,6 +123,23 @@ KXBTCD-26JUN23-B104   104000–104500            12    41%    52%   +11%    1820
 `implied_prob` / `model_prob` / `edge` / `open_interest`), ready to feed the
 `/kalshi/snapshot` API endpoint (Phase 2) or a cockpit panel.
 
+## Real-Time Monitor
+
+`scripts/monitor.py` polls the snapshot on a fast loop (default 2s — ample for
+15-min markets, needs no credentials) and emits **change/anomaly events** for the
+live cockpit: `WINDOW_OPEN`, `EXPIRING`, `TAPE_IMBALANCE`, `LARGE_PRINT`,
+`IMPLIED_MOVE`, `EDGE_SUSPECT`.
+
+```bash
+python scripts/monitor.py --series KXBTC15M            # pretty console
+python scripts/monitor.py --series KXBTC15M --ndjson   # one JSON event/line (feeds SSE)
+```
+
+`--ndjson` output is the stream the FastAPI SSE endpoint relays to the browser
+panel. True tick-level streaming is the optional upgrade: Kalshi's WebSocket
+(`wss://.../trade-api/ws/v2`) requires a signed **read-only** API key (no trading
+scope), and the engine's event shape is designed to accept it as a drop-in.
+
 ## Swarm
 
 For the multi-agent "Palantir desk" view, run the **`kalshi_btc_15m_desk`** swarm
