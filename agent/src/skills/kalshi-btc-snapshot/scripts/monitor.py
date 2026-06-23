@@ -105,11 +105,12 @@ def diff_tick(snap: dict[str, Any], state: dict[str, dict],
                            "imbalance": flow["imbalance"],
                            "side": "yes" if flow["imbalance"] > 0 else "no"})
 
-        if m.get("edge_reliability") == "suspect":
+        if m.get("edge_reliability") == "suspect" and prev.get("rel") != "suspect":
             events.append({"type": "EDGE_SUSPECT", "ticker": tkr,
                            "edge": m["edge"], "warning": m.get("warning")})
 
-        state[tkr] = {"implied": m["implied_prob"], "newest_ts": flow["newest_ts"]}
+        state[tkr] = {"implied": m["implied_prob"], "newest_ts": flow["newest_ts"],
+                      "rel": m.get("edge_reliability")}
     return events
 
 
