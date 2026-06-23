@@ -532,6 +532,7 @@ def _build_variables(preset_name: str, prompt: str) -> dict[str, str]:
         "etf_allocation_desk": {"risk_profile": _risk_to_etf_profile(risk), "market": market},
         "derivatives_strategy_desk": {"target": g, "view": "neutral"},
         "crypto_research_lab": {"target": "BTC, ETH, SOL", "timeframe": "medium-term 1-3 months"},
+        "kalshi_btc_15m_desk": {"target": "BTC", "timeframe": "next 15-minute expiry"},
         "credit_research_team": {"target": g, "market": "China credit bonds"},
         "convertible_bond_team": {
             "market": "A-share convertible bonds",
