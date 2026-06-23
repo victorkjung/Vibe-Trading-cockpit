@@ -272,8 +272,9 @@ def _print_table(snap: dict[str, Any], top: int, min_edge: float) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Kalshi BTC 15-minute market snapshot")
-    parser.add_argument("--series", default=os.environ.get("KALSHI_BTC_SERIES", "KXBTCD"),
-                        help="Kalshi series ticker (verify the exact 15-min series in your account)")
+    parser.add_argument("--series", default=os.environ.get("KALSHI_BTC_SERIES", "KXBTC15M"),
+                        help="Kalshi series ticker. KXBTC15M = 15-min up/down (default); "
+                             "KXBTCD = hourly above/below strike ladder; KXBTC = longer-dated ranges.")
     parser.add_argument("--top", type=int, default=10, help="Max rows to print in table mode")
     parser.add_argument("--min-edge", type=float, default=0.0, help="Only show |edge| >= this (0-1)")
     parser.add_argument("--json", action="store_true", help="Emit JSON only (machine-readable)")

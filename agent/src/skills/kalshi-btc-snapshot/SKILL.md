@@ -8,10 +8,10 @@ category: crypto
 
 ## Overview
 
-Kalshi lists short-horizon binary markets on the BTC settlement price (15-minute
-and hourly brackets). Each market is a YES/NO contract: "will BTC settle inside
-this price bracket at expiry?" The YES price in cents is the market's **implied
-probability**.
+Kalshi lists short-horizon binary markets on the BTC settlement price. Each
+market is a YES/NO contract whose YES price in cents is the market's **implied
+probability**. The flagship 15-minute market is an **up/down** contract: "will
+BTC settle above the strike at the end of this 15-minute window?"
 
 This skill produces a **decision-support snapshot** (research only — it does not
 place orders) by joining three feeds:
@@ -36,22 +36,44 @@ and view results from any browser. Macky / laptops are thin clients only.
 
 ```bash
 pip install requests          # only hard dependency
-python scripts/snapshot.py --series KXBTCD --top 8
+python scripts/snapshot.py --series KXBTC15M --top 8
 python scripts/snapshot.py --json            # machine-readable for piping / API
-python scripts/snapshot.py --min-edge 0.05   # only brackets with |edge| >= 5%
+python scripts/snapshot.py --min-edge 0.05   # only markets with |edge| >= 5%
 ```
 
 Continuous loop on the VPS (every minute):
 
 ```bash
-watch -n 60 'python scripts/snapshot.py --series KXBTCD --min-edge 0.04'
+watch -n 60 'python scripts/snapshot.py --series KXBTC15M --min-edge 0.04'
 ```
+
+## Kalshi BTC Market Taxonomy (verified June 2026)
+
+Pick the series that matches your horizon. The snapshot script works for all of
+them — only the strike semantics differ.
+
+| Series ticker | Frequency | Structure | Event ticker format | Settlement |
+|---------------|-----------|-----------|---------------------|------------|
+| **`KXBTC15M`** | **15-min** | **Up/Down** — single strike near the open price; YES = BTC settles *above* strike | `KXBTC15M-{YYMONDDHHMM}` (e.g. `KXBTC15M-26JUN161400`) | Kalshi captured **RTI** reference (avg of 60 prices in the final minute) |
+| `KXBTCD` | Hourly | **Above/Below ladder** — ~200 strikes per window, each a "greater than floor" market | `KXBTCD-{YYMONDD}{HH}` (ET hour) | CF Benchmarks **BRRNY** index (1-hour TWAP) |
+| `KXBTC` | Daily / longer | **Price ranges** — floor/cap brackets | `KXBTC-{YYMONDD}-{strike}` | BRRNY index |
+| `KXBTCY` / `KXBTCMAXY` / `KXBTCMINY` | Yearly | Range / max / min | — | BRRNY index |
+
+Notes that affect the model:
+- **15-min markets resolve the winner at 99¢, not 100¢** (1¢ effective fee). The
+  snapshot reports edge as a *probability* gap (`model − implied`); for true EV,
+  fair YES price ≈ `model_prob × 99¢`.
+- `KXBTC15M` strike sits near the prevailing BTC price at open, banded to a round
+  number — so the model collapses to `P(S_T > strike)`, which the script computes
+  via the "greater" branch (`cap_strike = None`).
+- The 15-min reference (RTI) differs slightly from OKX spot used here; treat the
+  model as an approximation, sharpest when there's no scheduled catalyst.
 
 ## Configuration
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `KALSHI_BTC_SERIES` | `KXBTCD` | Series ticker. **Verify the exact 15-min series in your Kalshi account** — series tickers change and the default may be daily/hourly. |
+| `KALSHI_BTC_SERIES` | `KXBTC15M` | Series ticker (see taxonomy above). **Verify it's live in your account** — query `GET /markets?series_ticker=KXBTC15M` or check the market page URL `kalshi.com/markets/kxbtc15m/...`. |
 | `KALSHI_API_BASE` | `https://api.elections.kalshi.com/trade-api/v2` | Kalshi API base |
 | `KALSHI_BEARER_TOKEN` | _(unset)_ | Optional pass-through bearer; **not required** for market data |
 | `OKX_API_BASE` | `https://www.okx.com/api/v5` | Spot/vol source |
