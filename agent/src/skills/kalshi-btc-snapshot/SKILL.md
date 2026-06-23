@@ -35,11 +35,18 @@ and view results from any browser. Macky / laptops are thin clients only.
 ## Quick Start
 
 ```bash
+# On a PEP 668 "externally-managed" host (Debian/Ubuntu), use a venv:
+python3 -m venv .venv && . .venv/bin/activate
 pip install requests          # only hard dependency
+
 python scripts/snapshot.py --series KXBTC15M --top 8
 python scripts/snapshot.py --json            # machine-readable for piping / API
 python scripts/snapshot.py --min-edge 0.05   # only markets with |edge| >= 5%
 ```
+
+> If you hit `error: externally-managed-environment`, that's PEP 668 — use the
+> venv above (preferred) or `pip install --break-system-packages requests`.
+> Use `python3` if the bare `python` alias isn't on PATH.
 
 Continuous loop on the VPS (every minute):
 
