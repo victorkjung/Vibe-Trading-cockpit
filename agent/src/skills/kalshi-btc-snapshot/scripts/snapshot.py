@@ -138,6 +138,43 @@ def fetch_btc_spot() -> float:
     return float(resp.json()["data"][0]["last"])
 
 
+def fetch_price_history(minutes: int = 60) -> list[dict[str, Any]]:
+    """Recent 1m BTC closes for seeding the chart, oldest->newest.
+
+    Uses Coinbase BTC-USD candles to stay on the same USD scale as the live
+    BRTI-tracked spot (avoids a basis seam where history meets the live feed).
+    Falls back to OKX BTC-USDT only if Coinbase is unreachable.
+
+    Returns:
+        List of {"t": epoch_ms, "spot": close} (oldest first), or [] on failure.
+    """
+    t = min(HTTP_TIMEOUT, 5.0)
+    try:
+        r = requests.get(
+            "https://api.exchange.coinbase.com/products/BTC-USD/candles",
+            params={"granularity": 60}, timeout=t,
+            headers={"User-Agent": "kalshi-snapshot"},
+        )
+        r.raise_for_status()
+        # Coinbase rows: [time_s, low, high, open, close, volume], newest first.
+        rows = sorted(r.json(), key=lambda c: c[0])[-minutes:]
+        pts = [{"t": int(c[0]) * 1000, "spot": float(c[4])} for c in rows]
+        if pts:
+            return pts
+    except Exception:
+        pass
+    try:
+        r = requests.get(
+            f"{OKX_BASE}/market/candles",
+            params={"instId": "BTC-USDT", "bar": "1m", "limit": str(minutes)}, timeout=t,
+        )
+        r.raise_for_status()
+        rows = sorted(r.json()["data"], key=lambda c: int(c[0]))
+        return [{"t": int(c[0]), "spot": float(c[4])} for c in rows]
+    except Exception:
+        return []
+
+
 def fetch_realized_vol(bars: int = 90) -> float:
     """Annualized realized volatility from recent OKX 1-minute candles.
 

@@ -44,6 +44,12 @@ def api_snapshot() -> JSONResponse:
     return JSONResponse(snapshot.build_snapshot(SERIES, with_trades=True))
 
 
+@app.get("/api/history")
+def api_history() -> JSONResponse:
+    """Recent 1m BTC closes (~60 min) to seed the chart before SSE ticks."""
+    return JSONResponse({"points": snapshot.fetch_price_history(60)})
+
+
 @app.get("/api/stream")
 def api_stream() -> StreamingResponse:
     """SSE stream: one `data:` frame per poll (sync generator → threadpool)."""
@@ -220,7 +226,7 @@ function render(d){
   document.getElementById('rv').textContent = d.vol!=null ? (d.vol*100).toFixed(0)+"%" : "—";
   document.getElementById('legVol').textContent = d.vol!=null ? (d.vol*100).toFixed(0)+"%" : "—";
   if(!m){return;}
-  if(m.ticker!==primaryTk){primaryTk=m.ticker; hist=[];}  // new window → reset chart
+  primaryTk=m.ticker;  // continuous rolling price chart; target line tracks strike
   strike=m.floor_strike;
   if(m.minutes_to_close!=null) closeMs=Date.now()+m.minutes_to_close*60000;
   hist.push({t:new Date(d.ts).getTime(), spot:d.spot});
@@ -263,10 +269,16 @@ setInterval(()=>{const el=document.getElementById('cd');
   el.textContent=Math.floor(s/60)+":"+String(s%60).padStart(2,'0');
   el.style.color=s<120?"var(--red)":"var(--amb)";},1000);
 window.addEventListener('resize',drawChart);
+function seedHistory(){  // pre-fill chart from recent 1m closes before SSE ticks
+  fetch('/api/history').then(r=>r.json()).then(d=>{
+    if(hist.length===0 && d.points && d.points.length){ hist=d.points.slice(); drawChart(); }
+  }).catch(()=>{});
+}
 function connect(){const es=new EventSource('/api/stream');
   es.onmessage=ev=>{try{const d=JSON.parse(ev.data);if(d.type==='TICK')render(d);}catch(e){}};
   es.onerror=()=>{es.close();document.getElementById('window').textContent='reconnecting…';setTimeout(connect,2000);};
 }
+seedHistory();
 connect();
 </script></body></html>"""
 
