@@ -188,8 +188,12 @@ def _strikes(m: dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
 
 
 def _minutes_to_close(m: dict[str, Any]) -> Optional[float]:
-    """Minutes until the market closes/settles, from close_time/expiration_time."""
-    ts = m.get("close_time") or m.get("expiration_time")
+    """Minutes until the market settles.
+
+    Uses close_time (the 15-min window close); expiration_time is intentionally
+    *not* a fallback for KXBTC15M — it points a week out, not at settlement.
+    """
+    ts = m.get("close_time") or m.get("expected_expiration_time")
     if not ts:
         return None
     try:
@@ -197,6 +201,40 @@ def _minutes_to_close(m: dict[str, Any]) -> Optional[float]:
         return (dt - datetime.now(timezone.utc)).total_seconds() / 60.0
     except Exception:
         return None
+
+
+def _price(m: dict[str, Any], base: str) -> Optional[float]:
+    """Read a price as a probability in [0, 1].
+
+    Kalshi returns dollar-denominated strings (e.g. yes_bid_dollars="0.0020",
+    already on a 0-1 scale). Older/cent responses expose integer fields
+    (e.g. yes_bid in cents) gated by response_price_units. Prefer dollars.
+    """
+    d = m.get(f"{base}_dollars")
+    if d is not None:
+        try:
+            return float(d)
+        except (TypeError, ValueError):
+            return None
+    c = m.get(base)
+    if c is not None:
+        try:
+            return float(c) / 100.0
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _num(m: dict[str, Any], *keys: str) -> Optional[float]:
+    """First parseable numeric among keys (handles _fp float-strings)."""
+    for k in keys:
+        v = m.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+    return None
 
 
 def build_snapshot(series_ticker: str) -> dict[str, Any]:
@@ -209,14 +247,14 @@ def build_snapshot(series_ticker: str) -> dict[str, Any]:
     for m in markets:
         floor, cap = _strikes(m)
         mins = _minutes_to_close(m)
-        yes_bid = m.get("yes_bid")
-        yes_ask = m.get("yes_ask")
-        # Implied probability from the yes bid/ask mid (cents -> [0,1]).
+        yes_bid = _price(m, "yes_bid")
+        yes_ask = _price(m, "yes_ask")
+        # Implied probability from the yes bid/ask mid (dollar prices are 0-1).
         implied = None
         if yes_bid is not None and yes_ask is not None and (yes_bid or yes_ask):
-            implied = (yes_bid + yes_ask) / 2.0 / 100.0
-        elif m.get("last_price"):
-            implied = m["last_price"] / 100.0
+            implied = (yes_bid + yes_ask) / 2.0
+        else:
+            implied = _price(m, "last_price")
 
         model = (
             lognormal_prob_between(spot, sigma, mins, floor, cap)
@@ -235,8 +273,8 @@ def build_snapshot(series_ticker: str) -> dict[str, Any]:
             "implied_prob": round(implied, 4) if implied is not None else None,
             "model_prob": round(model, 4) if model is not None else None,
             "edge": round(edge, 4) if edge is not None else None,
-            "volume": m.get("volume"),
-            "open_interest": m.get("open_interest"),
+            "volume": _num(m, "volume_fp", "volume"),
+            "open_interest": _num(m, "open_interest_fp", "open_interest"),
         })
 
     rows.sort(key=lambda r: (abs(r["edge"]) if r["edge"] is not None else -1), reverse=True)
