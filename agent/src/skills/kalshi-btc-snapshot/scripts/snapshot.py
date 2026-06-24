@@ -243,6 +243,23 @@ def _kalshi_auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+def fetch_market(ticker: str) -> dict[str, Any]:
+    """Fetch a single market by ticker (for the authoritative settlement result).
+
+    After a 15-min window closes, Kalshi populates `result` ("yes"/"no") and
+    `status` ("settled"/"finalized"). Returns {} on any error.
+    """
+    try:
+        r = requests.get(
+            f"{KALSHI_BASE}/markets/{ticker}",
+            headers=_kalshi_auth_headers(), timeout=HTTP_TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json().get("market", {}) or {}
+    except Exception:
+        return {}
+
+
 def fetch_recent_trades(ticker: str, limit: int = 20) -> list[dict[str, Any]]:
     """Recent executed trades for a market (public /markets/trades endpoint).
 
