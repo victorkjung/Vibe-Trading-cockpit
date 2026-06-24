@@ -16,7 +16,7 @@ This application has four parts, layered on a single shared snapshot engine:
 |-----------|------|------------|
 | Snapshot engine + CLI | `scripts/snapshot.py` | Core data join; prints a table or JSON |
 | Real-time monitor | `scripts/monitor.py` | Polling loop that emits change/anomaly events |
-| Web cockpit | `scripts/serve.py` | Self-contained FastAPI dashboard + SSE stream |
+| Web cockpit | `scripts/serve.py` | Self-contained FastAPI dashboard + SSE stream + window ledger |
 | Swarm desk | `../../../config/swarm/kalshi_btc_15m_desk.yaml` | 3-agent preset that turns a snapshot into a sized, risk-gated call |
 
 The skill manifest (`SKILL.md`) documents how an agent loads and uses these
@@ -46,6 +46,7 @@ Data sources:
 | BTC spot | Coinbase / Kraken / Bitstamp USD median (OKX USDT fallback) | Tracks Kalshi's CF Benchmarks BRTI settlement index |
 | Realized vol | OKX 1m candles, annualized by `√525,600` | Short-horizon σ for the model |
 | Kalshi quotes / trades | Kalshi public `/markets` and `/markets/trades` | Implied probability and trade flow per bracket |
+| Settlement result | Kalshi `/markets/{ticker}` `result` field | Authoritative outcome for the window ledger |
 
 Kalshi market-data GET endpoints are **public**, so a snapshot needs **no
 credentials**. Live trading would require a signed RSA API key — out of scope.
@@ -121,7 +122,18 @@ python scripts/serve.py --series KXBTC15M --host 0.0.0.0 --port 8787
 
 The page shows the live up/down market (implied vs model, edge + reliability
 badge, local expiry countdown, OI/volume), a rolling BTC price chart with the
-strike target line, and a scrolling anomaly feed.
+strike target line, a **Recent Results** scorecard, and a scrolling anomaly feed.
+
+A single shared background poller feeds all connected browsers (one set of
+Kalshi requests regardless of how many tabs are open).
+
+**Auto-roll & window ledger.** When a 15-min window closes the cockpit rolls to
+the next live window automatically (showing a brief "settling…" state in the
+gap). On settlement it fetches Kalshi's authoritative `result` and logs the
+outcome against what the market and the model predicted — emitting a
+`WINDOW_SETTLED` event and a row in the Recent Results panel with per-side ✓/✗
+and a running model/market hit-rate. The ledger is persisted to JSONL
+(`KALSHI_RESULTS_FILE`) and restored on restart.
 
 Endpoints:
 
@@ -131,8 +143,17 @@ Endpoints:
 | `GET /api/snapshot` | One-shot JSON snapshot (with trades) |
 | `GET /api/history` | Recent ~60 1m BTC closes to seed the chart |
 | `GET /api/stream` | `text/event-stream` of monitor ticks (`TICK` + events) |
+| `GET /api/results` | Recent settled-window ledger (outcome vs model/market) |
 
 > Keep it bound to a private (e.g. Tailscale) IP, not a public interface.
+
+Run it always-on under a process manager, e.g. pm2:
+
+```bash
+pm2 start scripts/serve.py --name kalshi-cockpit \
+  --interpreter ./.venv/bin/python -- --series KXBTC15M
+pm2 save        # and `pm2 startup` once, for reboot persistence
+```
 
 ### 4. Swarm desk
 
@@ -152,10 +173,10 @@ Required template variables: `target` (e.g. `BTC`) and `timeframe` (e.g.
 ## Deployment
 
 The 15-minute cadence means this is meant to run **headless on an always-on
-VPS**, not a laptop that sleeps. Schedule `snapshot.py` (cron / systemd timer)
-or keep `serve.py` running, and treat laptops as thin browser clients. The VPS
-egress policy must allow `api.elections.kalshi.com` and `www.okx.com` (plus the
-Coinbase/Kraken/Bitstamp spot hosts).
+VPS**, not a laptop that sleeps. Keep `serve.py` running under pm2 (above) or
+schedule `snapshot.py` (cron / systemd timer), and treat laptops as thin browser
+clients. The VPS egress policy must allow `api.elections.kalshi.com` and
+`www.okx.com` (plus the Coinbase/Kraken/Bitstamp spot hosts).
 
 ## Configuration
 
@@ -168,8 +189,9 @@ All components read configuration from the environment:
 | `KALSHI_BEARER_TOKEN` | _(unset)_ | Optional pass-through bearer; **not required** for market data |
 | `OKX_API_BASE` | `https://www.okx.com/api/v5` | Spot/vol fallback source |
 | `SNAPSHOT_HTTP_TIMEOUT` | `10` | Per-request timeout (seconds) |
-| `KALSHI_MONITOR_INTERVAL` | `2.0` | Web cockpit SSE poll interval (seconds) |
+| `KALSHI_MONITOR_INTERVAL` | `2.0` | Web cockpit poll interval (seconds) |
 | `KALSHI_MONITOR_PORT` | `8787` | Default web cockpit port |
+| `KALSHI_RESULTS_FILE` | `~/.kalshi_cockpit_results.jsonl` | Settled-window ledger (JSONL) |
 
 CLI flags override the corresponding environment defaults.
 
@@ -181,10 +203,14 @@ CLI flags override the corresponding environment defaults.
 3. **Realized vol ≠ implied vol** — the model uses backward-looking vol; near
    scheduled catalysts (CPI, FOMC) it understates true risk. Treat raw edge as a
    screen, not a trigger.
-4. **15-min markets resolve the winner at 99¢, not 100¢** (1¢ effective fee);
-   the reported edge is a probability gap, so for true EV use
-   `fair YES price ≈ model_prob × 99¢`.
-5. **Thin books** — short-horizon brackets can be illiquid; always sanity-check
+4. **Settlement payout / fee** — the live `/markets` payload reports
+   `notional_value_dollars: 1.00`. Some sources note 15-min winners effectively
+   resolve near 99¢ after a 1¢ fee. The reported edge is a *probability* gap, so
+   for true EV verify the payout/fee in your own account before sizing.
+5. **Spot is a BRTI approximation** — a USD median of Coinbase/Kraken/Bitstamp,
+   close to but not identical to Kalshi's exact RTI/BRRNY settlement print; the
+   model is a screen, sharpest with no scheduled catalyst.
+6. **Thin books** — short-horizon brackets can be illiquid; always sanity-check
    `open_interest` / `volume` before trusting an edge.
 
 See `SKILL.md` for the full Kalshi BTC market taxonomy, methodology, and the
