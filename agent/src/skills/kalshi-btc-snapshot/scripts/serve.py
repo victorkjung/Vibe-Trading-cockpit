@@ -28,11 +28,14 @@ Endpoints:
     GET /api/history       ~60 min of 1m closes to seed the chart
     GET /api/stream        text/event-stream relaying the shared poller
     GET /api/results       recent settled-window ledger (JSON)
-    GET /api/cg/overview   CoinGecko BTC market overview (cached 60s)
-    GET /api/cg/chart      CoinGecko price/mcap/volume series (?days=1|7|30|90|365|max)
-    GET /api/cg/tickers    top exchange tickers for BTC (cached 5m)
-    GET /api/cg/treasuries public-company BTC treasuries (cached 1h)
-    GET /api/cg/news       Bitcoin news (CoinGecko Pro if keyed, else RSS; 15m)
+    GET /api/cg/overview    CoinGecko BTC market overview (cached 60s)
+    GET /api/cg/chart       CoinGecko price/mcap/volume series (?days=1|7|30|90|365|max)
+    GET /api/cg/tickers     top exchange tickers for BTC (cached 5m)
+    GET /api/cg/treasuries  public-company BTC treasuries (cached 1h)
+    GET /api/cg/news        Bitcoin news (CoinGecko Pro if keyed, else RSS; 15m)
+    GET /api/cg/trending    24h trending search coins/NFTs/categories (cached 10m)
+    GET /api/cg/categories  coin categories mcap/volume/24h% (?order=&limit=; cached 5m)
+    GET /api/cg/global      global market overview: mcap, volume, BTC/ETH dominance (cached 60s)
 """
 
 from __future__ import annotations
@@ -53,6 +56,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import coingecko  # noqa: E402
+import editorial  # noqa: E402
 import monitor  # noqa: E402
 import snapshot  # noqa: E402
 
@@ -161,12 +165,14 @@ def _poller() -> None:
 
             with _LOCK:
                 _SEQ += 1
+                primary_market = next((m for m in snap["markets"] if not m.get("expired")), {})
                 _LATEST = {
                     "type": "TICK", "seq": _SEQ, "ts": snap["generated_at"],
                     "spot": snap["btc_spot"], "series": SERIES,
                     "vol": snap.get("realized_vol_annual"),
                     "live_count": snap.get("live_market_count", 0),
                     "markets": snap["markets"], "events": events,
+                    "editorial": editorial.editorial_summary(primary_market, snap["btc_spot"]),
                     "ledger": list(_LEDGER)[:10],
                 }
         except Exception as exc:  # noqa: BLE001 - never kill the poller
@@ -225,6 +231,21 @@ def api_cg_treasuries() -> JSONResponse:
 @app.get("/api/cg/news")
 def api_cg_news() -> JSONResponse:
     return _cg(coingecko.news)
+
+
+@app.get("/api/cg/trending")
+def api_cg_trending(force: int = 0) -> JSONResponse:
+    return _cg(lambda: coingecko.trending(force=bool(force)))
+
+
+@app.get("/api/cg/categories")
+def api_cg_categories(order: str = "market_cap_desc", limit: int = 40, force: int = 0) -> JSONResponse:
+    return _cg(lambda: coingecko.categories(order=order, limit=limit, force=bool(force)))
+
+
+@app.get("/api/cg/global")
+def api_cg_global(force: int = 0) -> JSONResponse:
+    return _cg(lambda: coingecko.global_market(force=bool(force)))
 
 
 @app.get("/api/stream")
@@ -335,6 +356,18 @@ _HTML = r"""<!doctype html>
   .newsit .d{color:var(--mut);font-size:12px;margin-top:4px}
   .loading{color:var(--mut);padding:26px 0;text-align:center;font-size:13px}
   .scroller{max-height:430px;overflow:auto}
+  .coinimg{width:18px;height:18px;border-radius:50%;vertical-align:middle;margin-right:6px;background:var(--panel)}
+  .coinimgs{display:inline-flex;gap:2px;vertical-align:middle}
+  .coinimgs img{width:16px;height:16px;border-radius:50%;background:var(--panel)}
+  .panehead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+  .panehead .hint{font-size:12px;color:var(--mut)}
+  .btnref{background:var(--panel);border:1px solid var(--line);color:var(--fg);font:600 12px inherit;
+    font-family:inherit;padding:5px 11px;border-radius:8px;cursor:pointer}
+  .btnref:hover{border-color:var(--gecko);color:var(--gecko)}
+  .subtabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+  .subtab{background:var(--panel);border:1px solid var(--line);color:var(--mut);font:600 12px inherit;
+    font-family:inherit;padding:5px 10px;border-radius:8px;cursor:pointer}
+  .subtab.on{color:var(--gecko);border-color:var(--gecko)}
 
   /* ── section divider ────────────────────────────────────────────────── */
   .secdiv{display:flex;align-items:center;gap:12px;padding:12px 22px;
@@ -352,7 +385,16 @@ _HTML = r"""<!doctype html>
   .stat .chg{font-size:13px;margin-top:2px;font-variant-numeric:tabular-nums}
   .wrap{display:grid;grid-template-columns:1fr 360px;gap:0}
   .left{border-right:1px solid var(--line)}
-  .chartbox{padding:14px 18px 4px} #chart{width:100%;height:330px;display:block}
+  .chartbox{padding:14px 18px 4px} #chart{width:100%;height:410px;display:block}
+  .kalshi-editorial{padding:22px 22px 4px;max-width:980px}
+  .kalshi-editorial .eyebrow{font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--mut);margin-bottom:6px}
+  .kalshi-editorial h2{font-family:Georgia,"Times New Roman",serif;font-size:30px;font-weight:500;line-height:1.08;letter-spacing:-.45px;margin:0;color:var(--fg)}
+  .kalshi-editorial p{font-size:13px;color:var(--mut);margin:8px 0 0;max-width:760px}
+  .prob-labels{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:8px 22px 4px}
+  .prob-label{border-top:1px solid var(--line);padding-top:9px;color:var(--mut);font-size:11px}
+  .prob-label b{display:block;font-size:17px;margin-top:2px;font-variant-numeric:tabular-nums}
+  .prob-label.market b{color:#d5d7dc}.prob-label.model b{color:var(--orange)}
+  .kalshi-source{font-size:10px;color:var(--mut);padding:0 22px 14px;letter-spacing:.2px}
   .settling{padding:8px 22px;color:var(--amb);font-size:13px}
   .chartleg{display:flex;gap:18px;padding:0 22px 10px;color:var(--mut);font-size:12px}
   .ud{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:6px 18px 16px}
@@ -394,6 +436,12 @@ _HTML = r"""<!doctype html>
     .perf{grid-template-columns:repeat(3,1fr)}
     .stats{flex-wrap:wrap}
   }
+  @media (max-width:520px){
+    .top{padding:12px 14px;gap:8px}.top .brandx{display:none}.top .live{font-size:10px;white-space:nowrap}
+    .kalshi-editorial{padding:18px 14px 2px}.kalshi-editorial h2{font-size:24px}
+    .chartbox{padding:10px 8px 4px}#chart{height:390px}.prob-labels{padding:8px 14px 4px}
+    .kalshi-source{padding:0 14px 12px}.stat{min-width:50%;padding:12px 14px}.stat .val{font-size:24px}
+  }
 </style></head><body>
 
 <div class="top">
@@ -434,6 +482,9 @@ _HTML = r"""<!doctype html>
     <div class="cgmain">
       <nav class="tabs">
         <button class="tab on" data-tab="overview">Overview</button>
+        <button class="tab" data-tab="global">Global</button>
+        <button class="tab" data-tab="trending">Trending</button>
+        <button class="tab" data-tab="categories">Categories</button>
         <button class="tab" data-tab="markets">Markets</button>
         <button class="tab" data-tab="treasuries">Treasuries</button>
         <button class="tab" data-tab="news">News</button>
@@ -465,6 +516,62 @@ _HTML = r"""<!doctype html>
           <span>source: CoinGecko API</span>
         </div>
         <div class="perf" id="perf"></div>
+      </div>
+
+      <div class="tabpane" id="tab-global">
+        <div class="panehead">
+          <div class="hint">Macro market overview · total mcap / volume / BTC&amp;ETH dominance · auto-refresh 60s</div>
+          <button class="btnref" id="globalRefresh" type="button">Refresh</button>
+        </div>
+        <div class="scroller">
+          <div class="loading" id="globalLoad">loading global market…</div>
+          <div class="analytics" id="globalChips" style="padding:0 0 12px;display:none"></div>
+          <div class="cgnote" id="globalNote" style="display:none"></div>
+        </div>
+      </div>
+
+      <div class="tabpane" id="tab-trending">
+        <div class="panehead">
+          <div class="hint">Retail narrative heat · top 24h CoinGecko searches · auto-refresh 10m</div>
+          <button class="btnref" id="trendingRefresh" type="button">Refresh</button>
+        </div>
+        <div class="subtabs" id="trendSub">
+          <button class="subtab on" data-sub="coins" type="button">Coins</button>
+          <button class="subtab" data-sub="nfts" type="button">NFTs</button>
+          <button class="subtab" data-sub="cats" type="button">Categories</button>
+        </div>
+        <div class="scroller">
+          <div class="loading" id="trendLoad">loading trending search…</div>
+          <table class="cgt" id="trendCoinsTbl" style="display:none">
+            <thead><tr><th>#</th><th>Coin</th><th>Price</th><th>24h</th><th>Mcap</th><th>Volume</th></tr></thead>
+            <tbody></tbody></table>
+          <table class="cgt" id="trendNftsTbl" style="display:none">
+            <thead><tr><th>Collection</th><th>Floor</th><th>24h</th><th>24h Vol</th></tr></thead>
+            <tbody></tbody></table>
+          <table class="cgt" id="trendCatsTbl" style="display:none">
+            <thead><tr><th>Category</th><th>Coins</th><th>Mcap</th><th>24h</th><th>1h</th><th>Volume</th></tr></thead>
+            <tbody></tbody></table>
+        </div>
+      </div>
+
+      <div class="tabpane" id="tab-categories">
+        <div class="panehead">
+          <div class="hint">Sector rotation · category mcap / volume / 24h% · auto-refresh 5m</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <div class="pills" id="catOrderPills">
+              <button class="pill on" data-order="market_cap_desc" type="button">Mcap</button>
+              <button class="pill" data-order="market_cap_change_24h_desc" type="button">24h Δ</button>
+              <button class="pill" data-order="name_asc" type="button">Name</button>
+            </div>
+            <button class="btnref" id="categoriesRefresh" type="button">Refresh</button>
+          </div>
+        </div>
+        <div class="scroller">
+          <div class="loading" id="catsLoad">loading coin categories…</div>
+          <table class="cgt" id="catsTbl" style="display:none">
+            <thead><tr><th>Category</th><th>Top</th><th>Market Cap</th><th>24h</th><th>24h Volume</th></tr></thead>
+            <tbody></tbody></table>
+        </div>
       </div>
 
       <div class="tabpane" id="tab-markets">
@@ -515,13 +622,18 @@ _HTML = r"""<!doctype html>
 </div>
 <div class="wrap">
   <div class="left">
+    <div class="kalshi-editorial">
+      <div class="eyebrow">Probability disagreement · next 15-minute close</div>
+      <h2 id="kalshiHeadline">Waiting for a usable 15-minute market quote.</h2>
+      <p id="kalshiDeck">Market probability and model fair value will appear when both inputs are available.</p>
+    </div>
     <div class="chartbox"><canvas id="chart"></canvas></div>
     <div class="settling" id="settling" style="display:none">⏳ window settling — waiting for the next 15-min window…</div>
-    <div class="chartleg">
-      <span><span style="color:var(--orange)">━</span> BTC spot</span>
-      <span><span style="color:var(--grn)">┄</span> target $<span id="legStrike">—</span></span>
-      <span>vol <span class="muted" id="legVol">—</span></span>
+    <div class="prob-labels">
+      <div class="prob-label market">Market probability<b id="probMarketLabel">—</b></div>
+      <div class="prob-label model">Model fair value<b id="probModelLabel">—</b></div>
     </div>
+    <div class="kalshi-source" id="kalshiSource">Sources: Kalshi order book · VGH probability model · BTC spot feed · refreshed live via SSE</div>
     <div class="ud">
       <div class="udcard up"><div class="t">Up (Yes)</div><div class="p mono" id="up">—</div></div>
       <div class="udcard down"><div class="t">Down (No)</div><div class="p mono" id="down">—</div></div>
@@ -564,7 +676,8 @@ function compact(x){ if(x==null) return "—";
 const signPct = x => x==null ? "—" : (x>=0?"▲ ":"▼ ")+Math.abs(x).toFixed(1)+"%";
 
 /* ════════════════════════ CoinGecko layer ════════════════════════ */
-const CG = { days:"1", metric:"prices", series:null, loaded:{}, price:null };
+const CG = { days:"1", metric:"prices", series:null, loaded:{}, price:null,
+  trendSub:"coins", catOrder:"market_cap_desc", trending:null, categories:null, global:null };
 
 async function cgFetch(path){
   const r = await fetch(path);
@@ -709,7 +822,7 @@ $('metricPills').addEventListener('click',e=>{
   b.classList.add('on'); CG.metric=b.dataset.metric; drawCgChart();
 });
 
-/* — tabs (lazy-load each pane once) — */
+/* — tabs (lazy-load each pane once; trending/categories re-fetch on refresh) — */
 document.querySelector('.tabs').addEventListener('click',e=>{
   const b=e.target.closest('.tab'); if(!b) return;
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));
@@ -717,11 +830,155 @@ document.querySelector('.tabs').addEventListener('click',e=>{
   b.classList.add('on'); $('tab-'+b.dataset.tab).classList.add('on');
   const t=b.dataset.tab;
   if(t==='overview'){ drawCgChart(); }
+  if(t==='global' && !CG.loaded.global){ CG.loaded.global=1; loadGlobal(); }
+  if(t==='trending' && !CG.loaded.trending){ CG.loaded.trending=1; loadTrending(); }
+  if(t==='categories' && !CG.loaded.categories){ CG.loaded.categories=1; loadCategories(); }
   if(t==='markets' && !CG.loaded.markets){ CG.loaded.markets=1; loadMarkets(); }
   if(t==='treasuries' && !CG.loaded.treas){ CG.loaded.treas=1; loadTreasuries(); }
   if(t==='news' && !CG.loaded.news){ CG.loaded.news=1; loadNews(); }
   if(t==='historical' && !CG.loaded.hist){ CG.loaded.hist=1; loadHistorical(); }
 });
+
+$('globalRefresh').addEventListener('click',()=>loadGlobal(true));
+
+async function loadGlobal(force){
+  $('globalLoad').style.display='';
+  $('globalLoad').textContent='loading global market…';
+  $('globalChips').style.display='none';
+  try{
+    const d = await cgFetch('/api/cg/global'+(force?'?force=1':''));
+    CG.global = d;
+    const chg = d.market_cap_change_24h_pct;
+    const chgCls = chg==null?'muted':(chg>=0?'pos':'neg');
+    $('globalChips').innerHTML =
+      `<div class="chip"><div class="k">Total Market Cap</div><div class="v mono">${compact(d.total_market_cap_usd)}</div></div>
+       <div class="chip"><div class="k">24h Volume</div><div class="v mono">${compact(d.total_volume_usd)}</div></div>
+       <div class="chip"><div class="k">24h Mcap Δ</div><div class="v mono ${chgCls}">${chg==null?'—':((chg>=0?'+':'')+Number(chg).toFixed(2)+'%')}</div></div>
+       <div class="chip"><div class="k">BTC Dominance</div><div class="v mono">${d.btc_dominance!=null?Number(d.btc_dominance).toFixed(2)+'%':'—'}</div></div>
+       <div class="chip"><div class="k">ETH Dominance</div><div class="v mono">${d.eth_dominance!=null?Number(d.eth_dominance).toFixed(2)+'%':'—'}</div></div>
+       <div class="chip"><div class="k">Active Coins</div><div class="v mono">${f0(d.active_cryptocurrencies)}</div></div>
+       <div class="chip"><div class="k">Markets</div><div class="v mono">${f0(d.markets)}</div></div>`;
+    $('globalChips').style.display='flex';
+    $('globalNote').style.display='';
+    $('globalNote').innerHTML =
+      `<span>source: CoinGecko /global · updated ${d.fetched_at||'—'}</span>
+       <span class="muted">Treasury holdings: Treasuries tab · tx history not on free CG API</span>`;
+    $('globalLoad').style.display='none';
+  }catch(e){
+    CG.global=null;
+    $('globalLoad').textContent='global unavailable ('+e.message+')';
+  }
+}
+
+function showTrendSub(){
+  const s=CG.trendSub;
+  $('trendCoinsTbl').style.display = s==='coins' && CG.trending ? '' : 'none';
+  $('trendNftsTbl').style.display  = s==='nfts'  && CG.trending ? '' : 'none';
+  $('trendCatsTbl').style.display  = s==='cats'  && CG.trending ? '' : 'none';
+}
+$('trendSub').addEventListener('click',e=>{
+  const b=e.target.closest('.subtab'); if(!b) return;
+  document.querySelectorAll('#trendSub .subtab').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); CG.trendSub=b.dataset.sub; showTrendSub();
+});
+$('trendingRefresh').addEventListener('click',()=>loadTrending(true));
+$('categoriesRefresh').addEventListener('click',()=>loadCategories(true));
+$('catOrderPills').addEventListener('click',e=>{
+  const b=e.target.closest('.pill'); if(!b) return;
+  document.querySelectorAll('#catOrderPills .pill').forEach(p=>p.classList.remove('on'));
+  b.classList.add('on'); CG.catOrder=b.dataset.order; loadCategories(true);
+});
+
+function fmtMaybeCompact(x){
+  if(x==null || x==='') return '—';
+  if(typeof x==='number') return compact(x);
+  // CoinGecko often returns pre-formatted "$521,967,819" strings in trending
+  if(typeof x==='string' && x.trim().startsWith('$')) return x;
+  const n=Number(x); return Number.isFinite(n) ? compact(n) : String(x);
+}
+function thumbCell(url, label){
+  const img = url ? `<img class="coinimg" src="${url}" alt="" loading="lazy" referrerpolicy="no-referrer"/>` : '';
+  return `${img}${label||'—'}`;
+}
+function top3(imgs){
+  if(!imgs || !imgs.length) return '—';
+  return `<span class="coinimgs">${imgs.slice(0,3).map(u=>`<img src="${u}" alt="" loading="lazy" referrerpolicy="no-referrer"/>`).join('')}</span>`;
+}
+
+async function loadTrending(force){
+  $('trendLoad').style.display='';
+  $('trendLoad').textContent='loading trending search…';
+  $('trendCoinsTbl').style.display='none';
+  $('trendNftsTbl').style.display='none';
+  $('trendCatsTbl').style.display='none';
+  try{
+    const d = await cgFetch('/api/cg/trending'+(force?'?force=1':''));
+    CG.trending = d;
+    const ctb = document.querySelector('#trendCoinsTbl tbody'); ctb.innerHTML='';
+    (d.coins||[]).forEach((c,i)=>{
+      const ch=c.change_24h;
+      ctb.insertAdjacentHTML('beforeend', `<tr>
+        <td class="mono muted">${c.market_cap_rank!=null?c.market_cap_rank:(i+1)}</td>
+        <td>${thumbCell(c.thumb, `${c.name||'—'} <span class="muted mono" style="font-size:11px">${c.symbol||''}</span>`)}</td>
+        <td class="mono">${usd(c.price)}</td>
+        <td class="mono ${ch==null?'muted':(ch>=0?'pos':'neg')}">${ch==null?'—':(ch>=0?'+':'')+Number(ch).toFixed(1)+'%'}</td>
+        <td class="mono">${fmtMaybeCompact(c.market_cap)}</td>
+        <td class="mono">${fmtMaybeCompact(c.volume_24h)}</td></tr>`);
+    });
+    const ntb = document.querySelector('#trendNftsTbl tbody'); ntb.innerHTML='';
+    (d.nfts||[]).forEach(n=>{
+      const ch=n.floor_change_24h;
+      ntb.insertAdjacentHTML('beforeend', `<tr>
+        <td>${thumbCell(n.thumb, `${n.name||'—'} <span class="muted mono" style="font-size:11px">${n.symbol||''}</span>`)}</td>
+        <td class="mono">${n.floor_display|| (n.floor_native!=null?Number(n.floor_native).toFixed(3)+' '+(n.native_currency||''):'—')}</td>
+        <td class="mono ${ch==null?'muted':(ch>=0?'pos':'neg')}">${ch==null?'—':(ch>=0?'+':'')+Number(ch).toFixed(1)+'%'}</td>
+        <td class="mono">${n.volume_24h_display||'—'}</td></tr>`);
+    });
+    const ktb = document.querySelector('#trendCatsTbl tbody'); ktb.innerHTML='';
+    (d.categories||[]).forEach(c=>{
+      const ch=c.change_24h, h1=c.market_cap_1h_change;
+      ktb.insertAdjacentHTML('beforeend', `<tr>
+        <td>${top3(c.top_3_coins_images)} ${c.name||'—'}</td>
+        <td class="mono">${c.coins_count!=null?c.coins_count:'—'}</td>
+        <td class="mono">${fmtMaybeCompact(c.market_cap)}</td>
+        <td class="mono ${ch==null?'muted':(ch>=0?'pos':'neg')}">${ch==null?'—':(ch>=0?'+':'')+Number(ch).toFixed(2)+'%'}</td>
+        <td class="mono ${h1==null?'muted':(h1>=0?'pos':'neg')}">${h1==null?'—':(h1>=0?'+':'')+Number(h1).toFixed(2)+'%'}</td>
+        <td class="mono">${fmtMaybeCompact(c.volume_24h)}</td></tr>`);
+    });
+    $('trendLoad').style.display='none';
+    showTrendSub();
+  }catch(e){
+    CG.trending=null;
+    $('trendLoad').textContent='trending unavailable ('+e.message+')';
+  }
+}
+
+async function loadCategories(force){
+  $('catsLoad').style.display='';
+  $('catsLoad').textContent='loading coin categories…';
+  $('catsTbl').style.display='none';
+  try{
+    const q = new URLSearchParams({order: CG.catOrder||'market_cap_desc', limit:'40'});
+    if(force) q.set('force', '1');
+    const d = await cgFetch('/api/cg/categories?'+q.toString());
+    CG.categories = d;
+    const tb = document.querySelector('#catsTbl tbody'); tb.innerHTML='';
+    (d.categories||[]).forEach(c=>{
+      const ch=c.market_cap_change_24h;
+      const tip = (c.content||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+      tb.insertAdjacentHTML('beforeend', `<tr>
+        <td title="${tip}">${c.name||'—'} <span class="muted mono" style="font-size:11px">${c.id||''}</span></td>
+        <td>${top3(c.top_3_coins)}</td>
+        <td class="mono">${compact(c.market_cap)}</td>
+        <td class="mono ${ch==null?'muted':(ch>=0?'pos':'neg')}">${ch==null?'—':(ch>=0?'+':'')+Number(ch).toFixed(2)+'%'}</td>
+        <td class="mono">${compact(c.volume_24h)}</td></tr>`);
+    });
+    $('catsLoad').style.display='none'; $('catsTbl').style.display='';
+  }catch(e){
+    CG.categories=null;
+    $('catsLoad').textContent='categories unavailable ('+e.message+')';
+  }
+}
 
 async function loadMarkets(){
   try{
@@ -805,9 +1062,19 @@ async function loadHistorical(){
 loadOverview(); loadCgChart();
 setInterval(loadOverview, 60000);
 setInterval(()=>{ if(CG.days==="1" && !document.hidden) loadCgChart(); }, 120000);
+// Refresh narrative tabs when open (server cache still applies).
+setInterval(()=>{
+  if(document.hidden) return;
+  const on = document.querySelector('.tab.on');
+  if(!on) return;
+  if(on.dataset.tab==='global' && CG.loaded.global) loadGlobal();
+  if(on.dataset.tab==='trending' && CG.loaded.trending) loadTrending();
+  if(on.dataset.tab==='categories' && CG.loaded.categories) loadCategories();
+}, 300000);
 
 /* ════════════════════════ Kalshi cockpit (original) ════════════════════════ */
 let hist = [], strike = null, closeMs = null;
+let latestProb = {market:null, model:null};
 
 function primary(markets){
   const live = (markets||[]).filter(m=>!m.expired && m.minutes_to_close!=null);
@@ -818,24 +1085,62 @@ function drawChart(){
   const c=document.getElementById('chart'); const w=c.clientWidth, h=c.clientHeight;
   c.width=w*dpr; c.height=h*dpr; const ctx=c.getContext('2d');
   ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
-  if(hist.length<2) return;
-  const pad={l:8,r:64,t:12,b:20};
-  const xs=hist.map(p=>p.t), ys=hist.map(p=>p.spot);
-  let lo=Math.min(...ys, strike??Infinity), hi=Math.max(...ys, strike??-Infinity);
-  const span=(hi-lo)||1; lo-=span*0.12; hi+=span*0.12;
-  const x0=xs[0], x1=xs[xs.length-1]||x0+1;
-  const X=t=>pad.l+(t-x0)/((x1-x0)||1)*(w-pad.l-pad.r);
-  const Y=v=>pad.t+(hi-v)/(hi-lo)*(h-pad.t-pad.b);
-  ctx.font="11px ui-monospace,monospace"; ctx.textBaseline="middle";
-  for(let i=0;i<=4;i++){const v=lo+(hi-lo)*i/4, y=Y(v);
-    ctx.strokeStyle="#1c1e25"; ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke();
-    ctx.fillStyle="#6b7080"; ctx.fillText("$"+Math.round(v).toLocaleString(), w-pad.r+6, y);}
-  if(strike!=null){const y=Y(strike); ctx.setLineDash([5,4]); ctx.strokeStyle="#00d181";
-    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke();ctx.setLineDash([]);}
-  ctx.strokeStyle="#f7931a"; ctx.lineWidth=2; ctx.beginPath();
-  hist.forEach((p,i)=>{const x=X(p.t),y=Y(p.spot); i?ctx.lineTo(x,y):ctx.moveTo(x,y);}); ctx.stroke();
-  const last=hist[hist.length-1]; ctx.fillStyle = strike!=null && last.spot>=strike ? "#00d181":"#ff4d57";
-  ctx.beginPath();ctx.arc(X(last.t),Y(last.spot),4,0,7);ctx.fill();
+  if(hist.length<1){
+    ctx.fillStyle='#747986';ctx.font="12px ui-monospace,monospace";ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText('Waiting for live probability history…',w/2,Math.min(h/2,180));return;
+  }
+  const compact = w < 560;
+  const pad={l:compact?38:48,r:compact?72:100,t:18,b:22};
+  const x0=hist[0].t, x1=hist[hist.length-1].t||x0;
+  const singlePoint=x1===x0;
+  const X=t=>singlePoint ? w-pad.r : pad.l+(t-x0)/(x1-x0)*(w-pad.l-pad.r);
+  ctx.font=(compact?'10px':'11px')+" ui-monospace,monospace";
+  ctx.textBaseline="middle";
+
+  // Top panel: YES probability over the live window. Model is the sole hero accent.
+  const probTop=30, probBottom=compact?215:225;
+  const PY=v=>probBottom-(Math.max(0,Math.min(1,v)))*(probBottom-probTop);
+  [0,.25,.5,.75,1].forEach(v=>{
+    const y=PY(v); ctx.strokeStyle=v===.5?'#3a3d46':'#242730'; ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke();
+    ctx.fillStyle='#747986';ctx.textAlign='right';ctx.fillText(Math.round(v*100)+'%',pad.l-7,y);
+  });
+  ctx.fillStyle='#a6a9b2';ctx.textAlign='left';ctx.fillText('YES probability',pad.l,12);
+  const probPts=hist.filter(p=>p.market!=null&&p.model!=null);
+  const drawSeries=(key,color,width)=>{
+    if(!probPts.length) return;
+    ctx.strokeStyle=color;ctx.lineWidth=width;ctx.beginPath();
+    probPts.forEach((p,i)=>{const x=X(p.t),y=PY(p[key]);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
+    const p=probPts[probPts.length-1], x=X(p.t), y=PY(p[key]);
+    ctx.fillStyle=color;ctx.beginPath();ctx.arc(x,y,key==='model'?4.5:3.5,0,Math.PI*2);ctx.fill();
+  };
+  drawSeries('market','#d5d7dc',1.7);
+  drawSeries('model','#f7931a',2.6);
+  if(probPts.length){
+    const p=probPts[probPts.length-1], x=X(p.t), ym=PY(p.market), yd=PY(p.model);
+    ctx.textAlign='left';ctx.font=(compact?'10px':'11px')+" ui-monospace,monospace";
+    let marketY=ym, modelY=yd;
+    if(Math.abs(marketY-modelY)<22){marketY-=11;modelY+=11;}
+    ctx.fillStyle='#d5d7dc';ctx.fillText('Market '+Math.round(p.market*100)+'%',x+9,marketY);
+    ctx.fillStyle='#f7931a';ctx.fillText('Model '+Math.round(p.model*100)+'%',x+9,modelY);
+    ctx.strokeStyle='#878b95';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x+2,ym);ctx.lineTo(x+2,yd);ctx.stroke();
+    const edge=Math.round((p.model-p.market)*100);
+    if(Math.abs(edge)>=3){ctx.fillStyle='#a6a9b2';ctx.textAlign='right';ctx.fillText((edge>0?'+':'')+edge+' pts',x-7,(ym+yd)/2);}
+  }
+
+  // Bottom context panel: BTC spot against the contract target, kept deliberately muted.
+  const spotTop=compact?258:270, spotBottom=h-pad.b;
+  const ys=hist.map(p=>p.spot).filter(v=>v!=null);
+  if(ys.length){
+    let lo=Math.min(...ys,strike??Infinity), hi=Math.max(...ys,strike??-Infinity);
+    const span=(hi-lo)||1;lo-=span*.16;hi+=span*.16;
+    const SY=v=>spotTop+(hi-v)/(hi-lo)*(spotBottom-spotTop);
+    ctx.fillStyle='#a6a9b2';ctx.textAlign='left';ctx.fillText('BTC spot vs target',pad.l,spotTop-13);
+    if(strike!=null){const y=SY(strike);ctx.setLineDash([4,4]);ctx.strokeStyle='#747986';ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='#747986';ctx.textAlign=compact?'right':'left';ctx.fillText('Target $'+Math.round(strike).toLocaleString(),compact?w-pad.r:w-pad.r+7,compact?y-9:y);}
+    ctx.strokeStyle='#d5d7dc';ctx.lineWidth=1.8;ctx.beginPath();
+    hist.forEach((p,i)=>{const x=X(p.t),y=SY(p.spot);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
+    const last=hist[hist.length-1];const lx=X(last.t),ly=SY(last.spot);ctx.fillStyle='#d5d7dc';ctx.beginPath();ctx.arc(lx,ly,3.5,0,Math.PI*2);ctx.fill();ctx.textAlign=compact?'right':'left';ctx.fillText('$'+Math.round(last.spot).toLocaleString(),compact?lx-8:lx+8,ly);
+  }
 }
 function renderResults(ledger){
   if(!ledger) return;
@@ -854,7 +1159,6 @@ function renderResults(ledger){
 }
 function render(d){
   document.getElementById('rv').textContent = d.vol!=null ? (d.vol*100).toFixed(0)+"%" : "—";
-  document.getElementById('legVol').textContent = d.vol!=null ? (d.vol*100).toFixed(0)+"%" : "—";
   renderResults(d.ledger);
   (d.events||[]).forEach(e=>{const div=document.createElement('div');div.className='ev';
     const rest=Object.entries(e).filter(([k])=>!['type','ticker','warning'].includes(k)).map(([k,v])=>k+'='+v).join(' ');
@@ -867,10 +1171,16 @@ function render(d){
   if(!m){ document.getElementById('window').textContent='settling — awaiting next window'; return; }
   strike=m.floor_strike;
   if(m.minutes_to_close!=null) closeMs=Date.now()+m.minutes_to_close*60000;
-  hist.push({t:new Date(d.ts).getTime(), spot:d.spot}); if(hist.length>240) hist.shift();
+  latestProb={market:m.implied_prob,model:m.model_prob};
+  hist.push({t:new Date(d.ts).getTime(), spot:d.spot, market:m.implied_prob, model:m.model_prob}); if(hist.length>240) hist.shift();
+  const ed=d.editorial||{};
+  document.getElementById('kalshiHeadline').textContent=ed.headline||'Waiting for a usable 15-minute market quote.';
+  document.getElementById('kalshiDeck').textContent=ed.deck||'Market probability and model fair value will appear when both inputs are available.';
+  document.getElementById('probMarketLabel').textContent=m.implied_prob==null?'—':Math.round(m.implied_prob*100)+'% YES';
+  document.getElementById('probModelLabel').textContent=m.model_prob==null?'—':Math.round(m.model_prob*100)+'% YES';
+  document.getElementById('kalshiSource').textContent='Sources: Kalshi order book · VGH probability model · BTC spot feed · updated '+new Date(d.ts).toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'});
   document.getElementById('window').textContent = m.ticker;
   document.getElementById('strike').textContent = "$"+f0(strike);
-  document.getElementById('legStrike').textContent = f0(strike);
   const spotEl=document.getElementById('spot'); spotEl.textContent="$"+f0(d.spot);
   spotEl.className="val mono "+(strike!=null && d.spot>=strike?"pos":"neg");
   if(strike!=null){const diff=d.spot-strike, p=diff/strike*100, c=diff>=0?"pos":"neg";

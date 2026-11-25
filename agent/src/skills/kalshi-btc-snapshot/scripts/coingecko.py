@@ -86,6 +86,13 @@ def _cached(key: str, ttl: float, fetch: Callable[[], Any]) -> Any:
     return val
 
 
+def _invalidate(prefix: str) -> None:
+    """Drop cache keys that start with prefix (used by force-refresh paths)."""
+    with _CACHE_LOCK:
+        for k in [k for k in _CACHE if k == prefix or k.startswith(prefix + ":")]:
+            del _CACHE[k]
+
+
 # --------------------------------------------------------------------------- #
 # Overview (price, market stats, change matrix)
 # --------------------------------------------------------------------------- #
@@ -251,3 +258,157 @@ def news() -> dict[str, Any]:
         arts.sort(key=lambda a: a.get("published_at") or "", reverse=True)
         return {"provider": "rss", "articles": arts[:25]}
     return _cached("news", 900, fetch)
+
+
+# --------------------------------------------------------------------------- #
+# Trending search (retail narrative / heat detector)
+# Upstream: GET /search/trending — top coins/NFTs/categories by 24h searches.
+# CoinGecko updates about every 10 minutes; we cache 10m.
+# --------------------------------------------------------------------------- #
+def trending(*, force: bool = False) -> dict[str, Any]:
+    if force:
+        _invalidate("trending")
+
+    def fetch() -> dict[str, Any]:
+        j = _get("search/trending")
+        coins = []
+        for row in j.get("coins", []) or []:
+            item = row.get("item") or {}
+            data = item.get("data") or {}
+            chg = data.get("price_change_percentage_24h") or {}
+            coins.append({
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "symbol": (item.get("symbol") or "").upper(),
+                "market_cap_rank": item.get("market_cap_rank"),
+                "score": item.get("score"),
+                "thumb": item.get("thumb") or item.get("small"),
+                "price": data.get("price"),
+                "change_24h": chg.get("usd") if isinstance(chg, dict) else None,
+                "market_cap": data.get("market_cap"),
+                "volume_24h": data.get("total_volume"),
+            })
+        nfts = []
+        for n in j.get("nfts", []) or []:
+            data = n.get("data") or {}
+            nfts.append({
+                "id": n.get("id"),
+                "name": n.get("name"),
+                "symbol": n.get("symbol"),
+                "thumb": n.get("thumb"),
+                "floor_native": n.get("floor_price_in_native_currency"),
+                "floor_change_24h": n.get("floor_price_24h_percentage_change"),
+                "native_currency": n.get("native_currency_symbol"),
+                "floor_display": data.get("floor_price"),
+                "volume_24h_display": data.get("h24_volume"),
+            })
+        categories = []
+        for c in j.get("categories", []) or []:
+            data = c.get("data") or {}
+            chg = data.get("market_cap_change_percentage_24h") or {}
+            categories.append({
+                "id": c.get("id"),
+                "name": c.get("name"),
+                "slug": c.get("slug"),
+                "coins_count": c.get("coins_count"),
+                "market_cap_1h_change": c.get("market_cap_1h_change"),
+                "market_cap": data.get("market_cap"),
+                "volume_24h": data.get("total_volume"),
+                "change_24h": chg.get("usd") if isinstance(chg, dict) else None,
+                "top_3_coins_images": c.get("top_3_coins_images") or [],
+            })
+        return {
+            "coins": coins,
+            "nfts": nfts,
+            "categories": categories,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+    return _cached("trending", 600, fetch)
+
+
+# --------------------------------------------------------------------------- #
+# Coin categories (sector rotation: L1, AI, DePIN, RWA, memes, …)
+# Upstream: GET /coins/categories — mcap / volume / 24h % per category.
+# CoinGecko updates about every 5 minutes; we cache 5m and return top N.
+# --------------------------------------------------------------------------- #
+def categories(order: str = "market_cap_desc", limit: int = 40, *, force: bool = False) -> dict[str, Any]:
+    allowed = {
+        "market_cap_desc", "market_cap_asc", "name_desc", "name_asc",
+        "market_cap_change_24h_desc", "market_cap_change_24h_asc",
+    }
+    order = order if order in allowed else "market_cap_desc"
+    try:
+        limit = max(5, min(int(limit), 100))
+    except (TypeError, ValueError):
+        limit = 40
+    cache_key = f"categories:{order}:{limit}"
+    if force:
+        _invalidate(cache_key)
+
+    def fetch() -> dict[str, Any]:
+        rows = _get("coins/categories", {"order": order})
+        if not isinstance(rows, list):
+            rows = []
+        out = []
+        for c in rows[:limit]:
+            out.append({
+                "id": c.get("id"),
+                "name": c.get("name"),
+                "market_cap": c.get("market_cap"),
+                "market_cap_change_24h": c.get("market_cap_change_24h"),
+                "volume_24h": c.get("volume_24h"),
+                "top_3_coins": c.get("top_3_coins") or [],
+                "top_3_coins_id": c.get("top_3_coins_id") or [],
+                "content": (c.get("content") or "")[:200] or None,
+                "updated_at": c.get("updated_at"),
+            })
+        return {
+            "order": order,
+            "limit": limit,
+            "count": len(out),
+            "categories": out,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+    return _cached(cache_key, 300, fetch)
+
+
+# --------------------------------------------------------------------------- #
+# Global market overview (macro: total mcap, volume, BTC/ETH dominance)
+# Upstream: GET /global — free tier; updates often; we cache 60s.
+# --------------------------------------------------------------------------- #
+def global_market(*, force: bool = False) -> dict[str, Any]:
+    if force:
+        _invalidate("global")
+
+    def fetch() -> dict[str, Any]:
+        j = _get("global")
+        data = j.get("data") if isinstance(j, dict) else None
+        if not isinstance(data, dict):
+            data = j if isinstance(j, dict) else {}
+        mcap = data.get("total_market_cap") or {}
+        vol = data.get("total_volume") or {}
+        chg = data.get("market_cap_change_percentage_24h_usd")
+        return {
+            "active_cryptocurrencies": data.get("active_cryptocurrencies"),
+            "upcoming_icos": data.get("upcoming_icos"),
+            "ongoing_icos": data.get("ongoing_icos"),
+            "ended_icos": data.get("ended_icos"),
+            "markets": data.get("markets"),
+            "total_market_cap_usd": mcap.get("usd") if isinstance(mcap, dict) else None,
+            "total_volume_usd": vol.get("usd") if isinstance(vol, dict) else None,
+            "market_cap_change_24h_pct": chg,
+            "btc_dominance": data.get("market_cap_percentage", {}).get("btc")
+            if isinstance(data.get("market_cap_percentage"), dict) else None,
+            "eth_dominance": data.get("market_cap_percentage", {}).get("eth")
+            if isinstance(data.get("market_cap_percentage"), dict) else None,
+            "market_cap_percentage": data.get("market_cap_percentage") or {},
+            "updated_at": data.get("updated_at"),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            # Tx-level public treasury history is not on free CoinGecko API;
+            # holdings snapshot lives at /api/cg/treasuries.
+            "notes": {
+                "treasury_tx_history": "not_available_free_tier",
+                "treasury_holdings_endpoint": "/api/cg/treasuries",
+            },
+        }
+    return _cached("global", 60, fetch)
